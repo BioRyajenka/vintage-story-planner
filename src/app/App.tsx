@@ -1,16 +1,48 @@
-import { useState, useCallback } from 'react';
-import { Grid } from './components/Grid';
+import { useState, useCallback, useEffect } from 'react';
+import { Grid, MIN_ZOOM, MAX_ZOOM } from './components/Grid';
 import { Toolbar } from './components/Toolbar';
 import { TodoList } from './components/TodoList';
 import { useSharedData } from './useSharedData';
 import type { GridItem, Todo, ItemType } from './types';
 
+const ZOOM_STEP = 1.2;
+
+function clampZoom(z: number) {
+  return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, z));
+}
+
 export default function App() {
-  const { data, setGridItems, setTodos } = useSharedData();
+  const { data, setGridItems, setTodos, peers, mySessionId, sendCursor } = useSharedData();
   const [selectedTool, setSelectedTool] = useState<ItemType>('building');
   const [selectedColor, setSelectedColor] = useState('#8b7355');
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [showTodoList, setShowTodoList] = useState(true);
+  const [zoom, setZoom] = useState(1);
+
+  const zoomIn = useCallback(() => setZoom((z) => clampZoom(z * ZOOM_STEP)), []);
+  const zoomOut = useCallback(() => setZoom((z) => clampZoom(z / ZOOM_STEP)), []);
+  const zoomReset = useCallback(() => setZoom(1), []);
+  const setZoomAround = useCallback((next: number, _anchor?: { px: number; py: number }) => {
+    setZoom(clampZoom(next));
+  }, []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      if (e.key === '=' || e.key === '+') {
+        e.preventDefault();
+        zoomIn();
+      } else if (e.key === '-' || e.key === '_') {
+        e.preventDefault();
+        zoomOut();
+      } else if (e.key === '0') {
+        e.preventDefault();
+        zoomReset();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [zoomIn, zoomOut, zoomReset]);
 
   const addGridItem = useCallback((item: GridItem) => {
     setGridItems(prev => [...prev, item]);
@@ -133,11 +165,6 @@ export default function App() {
       className="size-full flex flex-col overflow-hidden relative"
       style={{
         backgroundColor: '#f5f1e8',
-        backgroundImage: `
-          linear-gradient(rgba(139, 115, 85, 0.03) 1px, transparent 1px),
-          linear-gradient(90deg, rgba(139, 115, 85, 0.03) 1px, transparent 1px)
-        `,
-        backgroundSize: '20px 20px'
       }}
     >
       <Toolbar
@@ -147,9 +174,13 @@ export default function App() {
         onColorChange={setSelectedColor}
         onToggleTodoList={() => setShowTodoList(!showTodoList)}
         showTodoList={showTodoList}
+        zoom={zoom}
+        onZoomIn={zoomIn}
+        onZoomOut={zoomOut}
+        onZoomReset={zoomReset}
       />
 
-      <div className="flex-1 overflow-auto p-8">
+      <div className="flex-1 relative overflow-hidden">
         <Grid
           items={gridItems}
           selectedTool={selectedTool}
@@ -160,6 +191,11 @@ export default function App() {
           onReplacePathways={replacePathways}
           hoveredId={hoveredId}
           onHover={setHoveredId}
+          zoom={zoom}
+          onZoomChange={setZoomAround}
+          peers={peers}
+          mySessionId={mySessionId}
+          onCursor={sendCursor}
         />
       </div>
 

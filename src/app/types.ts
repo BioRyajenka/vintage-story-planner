@@ -24,3 +24,14 @@ export interface Todo {
   linkedItemId?: string;
   subItems: SubItem[];
 }
+
+export interface PeerCursor {
+  x: number;
+  y: number;
+}
+
+export interface Peer {
+  sessionId: string;
+  color: string;
+  cursor: PeerCursor | null;
+}

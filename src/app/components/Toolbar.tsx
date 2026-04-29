@@ -1,4 +1,4 @@
-import { Home, Square, Sprout, Circle, ListTodo } from 'lucide-react';
+import { Home, Square, Sprout, Circle, ListTodo, ZoomIn, ZoomOut, Maximize } from 'lucide-react';
 import type { ItemType } from '../types';
 
 interface ToolbarProps {
@@ -8,6 +8,10 @@ interface ToolbarProps {
   onColorChange: (color: string) => void;
   onToggleTodoList: () => void;
   showTodoList: boolean;
+  zoom: number;
+  onZoomIn: () => void;
+  onZoomOut: () => void;
+  onZoomReset: () => void;
 }
 
 const COLORS = [
@@ -25,8 +29,15 @@ export function Toolbar({
   selectedColor,
   onColorChange,
   onToggleTodoList,
-  showTodoList
+  showTodoList,
+  zoom,
+  onZoomIn,
+  onZoomOut,
+  onZoomReset,
 }: ToolbarProps) {
+  const zoomBtnClass =
+    'p-2 rounded-lg transition-all border-2 bg-white/70 text-[#5a4a3a] hover:bg-white border-[#8b7355]/30';
+
   return (
     <div
       className="h-16 bg-[#e8e4d9] border-b-4 flex items-center px-6 gap-6"
@@ -114,6 +125,35 @@ export function Toolbar({
       </div>
 
       <div className="flex-1" />
+
+      <div className="flex items-center gap-2">
+        <button
+          onClick={onZoomOut}
+          className={zoomBtnClass}
+          style={{ transform: 'rotate(-0.5deg)' }}
+          title="Zoom out (⌘−)"
+        >
+          <ZoomOut size={20} />
+        </button>
+        <button
+          onClick={onZoomReset}
+          className={zoomBtnClass + ' min-w-[3.25rem]'}
+          style={{ transform: 'rotate(0.5deg)', fontSize: 16, fontWeight: 600 }}
+          title="Reset zoom (⌘0)"
+        >
+          {Math.round(zoom * 100)}%
+        </button>
+        <button
+          onClick={onZoomIn}
+          className={zoomBtnClass}
+          style={{ transform: 'rotate(-0.5deg)' }}
+          title="Zoom in (⌘+)"
+        >
+          <ZoomIn size={20} />
+        </button>
+      </div>
+
+      <div className="h-8 w-0.5 bg-[#8b7355]/40" style={{ transform: 'rotate(1deg)' }} />
 
       <button
         onClick={onToggleTodoList}

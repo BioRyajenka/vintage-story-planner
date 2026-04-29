@@ -1,5 +1,5 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
-import type { GridItem, ItemType } from '../types';
+import { useEffect, useRef, useState, useCallback } from 'react';
+import type { GridItem, ItemType, Peer, PeerCursor } from '../types';
 import { GridItemComponent } from './GridItemComponent';
 
 interface GridProps {
@@ -12,11 +12,16 @@ interface GridProps {
   onReplacePathways: (removeIds: string[], add: GridItem[]) => void;
   hoveredId: string | null;
   onHover: (id: string | null) => void;
+  zoom: number;
+  onZoomChange: (next: number, anchor?: { px: number; py: number }) => void;
+  peers: Record<string, Peer>;
+  mySessionId: string | null;
+  onCursor: (cursor: PeerCursor | null) => void;
 }
 
-const GRID_SIZE = 40;
-const GRID_COLS = 30;
-const GRID_ROWS = 30;
+export const BASE_CELL = 40;
+export const MIN_ZOOM = 0.25;
+export const MAX_ZOOM = 4;
 
 type PathwayMutation = { remove: string[]; add: GridItem[] };
 
@@ -57,29 +62,13 @@ function planPathwayMutation(
     return s <= segStart && e >= segEnd;
   });
 
-  const makeSeg = (s: number, e: number, idSuffix = ''): GridItem => {
+  const makeSeg = (s: number, e: number, suffix = ''): GridItem => {
     const len = e - s + 1;
-    const baseId = `pathway-${Date.now()}${idSuffix}`;
+    const baseId = `pathway-${Date.now()}-${Math.random().toString(36).slice(2, 7)}${suffix}`;
     if (horizontal) {
-      return {
-        id: baseId,
-        type: 'pathway',
-        x: s,
-        y: axis,
-        width: len,
-        height: 1,
-        color,
-      };
+      return { id: baseId, type: 'pathway', x: s, y: axis, width: len, height: 1, color };
     }
-    return {
-      id: baseId,
-      type: 'pathway',
-      x: axis,
-      y: s,
-      width: 1,
-      height: len,
-      color,
-    };
+    return { id: baseId, type: 'pathway', x: axis, y: s, width: 1, height: len, color };
   };
 
   if (container) {
@@ -108,10 +97,7 @@ function planPathwayMutation(
     }
   }
 
-  return {
-    remove: Array.from(mergedIds),
-    add: [makeSeg(mergeStart, mergeEnd)],
-  };
+  return { remove: Array.from(mergedIds), add: [makeSeg(mergeStart, mergeEnd)] };
 }
 
 export function Grid({
@@ -124,24 +110,44 @@ export function Grid({
   onReplacePathways,
   hoveredId,
   onHover,
+  zoom,
+  onZoomChange,
+  peers,
+  mySessionId,
+  onCursor,
 }: GridProps) {
+  const cellPx = BASE_CELL * zoom;
+
+  const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [isDrawing, setIsDrawing] = useState(false);
+  const [isPanning, setIsPanning] = useState(false);
   const [startCell, setStartCell] = useState<{ x: number; y: number } | null>(null);
   const [currentCell, setCurrentCell] = useState<{ x: number; y: number } | null>(null);
   const [movingId, setMovingId] = useState<string | null>(null);
   const [moveCell, setMoveCell] = useState<{ x: number; y: number } | null>(null);
-  const gridRef = useRef<HTMLDivElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const panStart = useRef<{ x: number; y: number; px: number; py: number } | null>(null);
 
   const movingItem = movingId ? items.find((i) => i.id === movingId) ?? null : null;
 
-  const getCellFromEvent = useCallback((e: React.MouseEvent) => {
-    if (!gridRef.current) return null;
-    const rect = gridRef.current.getBoundingClientRect();
-    const x = Math.floor((e.clientX - rect.left) / GRID_SIZE);
-    const y = Math.floor((e.clientY - rect.top) / GRID_SIZE);
-    if (x < 0 || x >= GRID_COLS || y < 0 || y >= GRID_ROWS) return null;
-    return { x, y };
-  }, []);
+  const cellFromClient = useCallback(
+    (clientX: number, clientY: number) => {
+      const el = viewportRef.current;
+      if (!el) return null;
+      const rect = el.getBoundingClientRect();
+      const px = clientX - rect.left;
+      const py = clientY - rect.top;
+      return {
+        x: Math.floor((px - pan.x) / cellPx),
+        y: Math.floor((py - pan.y) / cellPx),
+        worldX: (px - pan.x) / cellPx,
+        worldY: (py - pan.y) / cellPx,
+        px,
+        py,
+      };
+    },
+    [pan, cellPx]
+  );
 
   useEffect(() => {
     if (!movingId) return;
@@ -155,6 +161,27 @@ export function Grid({
     return () => window.removeEventListener('keydown', onKey);
   }, [movingId]);
 
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        const factor = Math.exp(-e.deltaY * 0.0025);
+        const rect = el.getBoundingClientRect();
+        onZoomChange(
+          Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom * factor)),
+          { px: e.clientX - rect.left, py: e.clientY - rect.top }
+        );
+      } else {
+        e.preventDefault();
+        setPan((prev) => ({ x: prev.x - e.deltaX, y: prev.y - e.deltaY }));
+      }
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [zoom, onZoomChange]);
+
   const handleStartMove = useCallback((id: string) => {
     setMovingId(id);
     setMoveCell(null);
@@ -165,39 +192,59 @@ export function Grid({
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
-      const cell = getCellFromEvent(e);
-      if (!cell) return;
+      const c = cellFromClient(e.clientX, e.clientY);
+      if (!c) return;
+
+      if (e.button === 1 || (e.button === 0 && e.shiftKey)) {
+        e.preventDefault();
+        setIsPanning(true);
+        panStart.current = { x: e.clientX, y: e.clientY, px: pan.x, py: pan.y };
+        return;
+      }
+      if (e.button !== 0) return;
 
       if (movingItem) {
-        const x = Math.max(0, Math.min(GRID_COLS - movingItem.width, cell.x));
-        const y = Math.max(0, Math.min(GRID_ROWS - movingItem.height, cell.y));
-        onUpdateItem(movingItem.id, { x, y });
+        onUpdateItem(movingItem.id, { x: c.x, y: c.y });
         setMovingId(null);
         setMoveCell(null);
         return;
       }
 
       setIsDrawing(true);
-      setStartCell(cell);
-      setCurrentCell(cell);
+      setStartCell({ x: c.x, y: c.y });
+      setCurrentCell({ x: c.x, y: c.y });
     },
-    [getCellFromEvent, movingItem, onUpdateItem]
+    [cellFromClient, movingItem, onUpdateItem, pan]
   );
 
   const handleMouseMove = useCallback(
     (e: React.MouseEvent) => {
-      const cell = getCellFromEvent(e);
-      if (movingItem) {
-        if (cell) setMoveCell(cell);
+      const c = cellFromClient(e.clientX, e.clientY);
+      if (c) onCursor({ x: c.worldX, y: c.worldY });
+      if (isPanning && panStart.current) {
+        setPan({
+          x: panStart.current.px + (e.clientX - panStart.current.x),
+          y: panStart.current.py + (e.clientY - panStart.current.y),
+        });
         return;
       }
-      if (!isDrawing || !startCell) return;
-      if (cell) setCurrentCell(cell);
+      if (movingItem && c) {
+        setMoveCell({ x: c.x, y: c.y });
+        return;
+      }
+      if (isDrawing && startCell && c) {
+        setCurrentCell({ x: c.x, y: c.y });
+      }
     },
-    [isDrawing, startCell, getCellFromEvent, movingItem]
+    [cellFromClient, isDrawing, isPanning, movingItem, onCursor, startCell]
   );
 
   const finishDrawing = useCallback(() => {
+    if (isPanning) {
+      setIsPanning(false);
+      panStart.current = null;
+      return;
+    }
     if (!isDrawing || !startCell || !currentCell) {
       setIsDrawing(false);
       setStartCell(null);
@@ -222,7 +269,7 @@ export function Grid({
     const finalWidth = selectedTool === 'small' ? 1 : width;
     const finalHeight = selectedTool === 'small' ? 1 : height;
 
-    let label: string | undefined = undefined;
+    let label: string | undefined;
 
     if (selectedTool === 'building') {
       const input = prompt('Enter building name:');
@@ -244,7 +291,7 @@ export function Grid({
       label = input.trim();
     }
 
-    const newItem: GridItem = {
+    onAddItem({
       id: `item-${Date.now()}`,
       type: selectedTool,
       x,
@@ -253,14 +300,13 @@ export function Grid({
       height: finalHeight,
       color: selectedColor,
       label,
-    };
-
-    onAddItem(newItem);
+    });
     setIsDrawing(false);
     setStartCell(null);
     setCurrentCell(null);
   }, [
     isDrawing,
+    isPanning,
     startCell,
     currentCell,
     selectedTool,
@@ -270,80 +316,92 @@ export function Grid({
     onReplacePathways,
   ]);
 
-  const getPathwayPreview = () => {
-    if (!startCell || !currentCell) return null;
-    const dx = Math.abs(currentCell.x - startCell.x);
-    const dy = Math.abs(currentCell.y - startCell.y);
-    const horizontal = dx >= dy;
-    if (horizontal) {
-      const x = Math.min(startCell.x, currentCell.x);
-      const width = dx + 1;
-      return { x, y: startCell.y, width, height: 1 };
+  const previewRect = (() => {
+    if (!isDrawing || !startCell || !currentCell) return null;
+    if (selectedTool === 'pathway') {
+      const dx = Math.abs(currentCell.x - startCell.x);
+      const dy = Math.abs(currentCell.y - startCell.y);
+      const horizontal = dx >= dy;
+      if (horizontal) {
+        return {
+          x: Math.min(startCell.x, currentCell.x),
+          y: startCell.y,
+          width: dx + 1,
+          height: 1,
+        };
+      }
+      return {
+        x: startCell.x,
+        y: Math.min(startCell.y, currentCell.y),
+        width: 1,
+        height: dy + 1,
+      };
     }
-    const y = Math.min(startCell.y, currentCell.y);
-    const height = dy + 1;
-    return { x: startCell.x, y, width: 1, height };
-  };
-
-  const getPreviewRect = () => {
-    if (!startCell || !currentCell) return null;
-    if (selectedTool === 'pathway') return getPathwayPreview();
     const x = Math.min(startCell.x, currentCell.x);
     const y = Math.min(startCell.y, currentCell.y);
     const width = Math.abs(currentCell.x - startCell.x) + 1;
     const height = Math.abs(currentCell.y - startCell.y) + 1;
-    const finalWidth = selectedTool === 'small' ? 1 : width;
-    const finalHeight = selectedTool === 'small' ? 1 : height;
-    return { x, y, width: finalWidth, height: finalHeight };
-  };
-
-  const previewRect = isDrawing ? getPreviewRect() : null;
+    return {
+      x,
+      y,
+      width: selectedTool === 'small' ? 1 : width,
+      height: selectedTool === 'small' ? 1 : height,
+    };
+  })();
 
   const movePreviewRect = movingItem
-    ? (() => {
-        const target = moveCell ?? { x: movingItem.x, y: movingItem.y };
-        const x = Math.max(0, Math.min(GRID_COLS - movingItem.width, target.x));
-        const y = Math.max(0, Math.min(GRID_ROWS - movingItem.height, target.y));
-        return { x, y, width: movingItem.width, height: movingItem.height };
-      })()
+    ? {
+        x: moveCell?.x ?? movingItem.x,
+        y: moveCell?.y ?? movingItem.y,
+        width: movingItem.width,
+        height: movingItem.height,
+      }
     : null;
+
+  const peerList = Object.values(peers).filter(
+    (p) => p.sessionId !== mySessionId && p.cursor
+  );
 
   return (
     <div
-      className="inline-block bg-[#fdfbf7] p-8 rounded-lg shadow-xl border-3"
+      ref={viewportRef}
+      className={
+        'absolute inset-0 select-none ' +
+        (movingItem ? 'cursor-move' : isPanning ? 'cursor-grabbing' : 'cursor-crosshair')
+      }
       style={{
-        borderWidth: '4px',
-        borderColor: '#8b7355',
-        borderStyle: 'solid',
-        transform: 'rotate(-0.2deg)',
-        boxShadow: '4px 4px 0 rgba(139, 115, 85, 0.1), 8px 8px 20px rgba(0,0,0,0.15)',
+        backgroundColor: '#fdfbf7',
+        backgroundImage: `
+          linear-gradient(to right, rgba(139, 115, 85, 0.25) 1px, transparent 1px),
+          linear-gradient(to bottom, rgba(139, 115, 85, 0.25) 1px, transparent 1px)
+        `,
+        backgroundSize: `${cellPx}px ${cellPx}px`,
+        backgroundPosition: `${pan.x}px ${pan.y}px`,
+        boxShadow: 'inset 0 0 20px rgba(139, 115, 85, 0.05)',
+        overflow: 'hidden',
+      }}
+      onMouseDown={handleMouseDown}
+      onMouseMove={handleMouseMove}
+      onMouseUp={finishDrawing}
+      onMouseLeave={() => {
+        if (isDrawing || isPanning) finishDrawing();
+        onCursor(null);
       }}
     >
       <div
-        ref={gridRef}
-        className={movingItem ? 'relative cursor-move' : 'relative cursor-crosshair'}
+        className="absolute"
         style={{
-          width: GRID_COLS * GRID_SIZE,
-          height: GRID_ROWS * GRID_SIZE,
-          backgroundImage: `
-            linear-gradient(to right, rgba(139, 115, 85, 0.25) 1px, transparent 1px),
-            linear-gradient(to bottom, rgba(139, 115, 85, 0.25) 1px, transparent 1px)
-          `,
-          backgroundSize: `${GRID_SIZE}px ${GRID_SIZE}px`,
-          boxShadow: 'inset 0 0 20px rgba(139, 115, 85, 0.05)',
-        }}
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={finishDrawing}
-        onMouseLeave={() => {
-          if (isDrawing) finishDrawing();
+          left: pan.x,
+          top: pan.y,
+          width: 0,
+          height: 0,
         }}
       >
         {items.map((item) => (
           <GridItemComponent
             key={item.id}
             item={item}
-            gridSize={GRID_SIZE}
+            gridSize={cellPx}
             isHovered={hoveredId === item.id}
             isMoving={movingId === item.id}
             onHover={onHover}
@@ -357,10 +415,10 @@ export function Grid({
           <div
             className="absolute pointer-events-none"
             style={{
-              left: previewRect.x * GRID_SIZE,
-              top: previewRect.y * GRID_SIZE,
-              width: previewRect.width * GRID_SIZE,
-              height: previewRect.height * GRID_SIZE,
+              left: previewRect.x * cellPx,
+              top: previewRect.y * cellPx,
+              width: previewRect.width * cellPx,
+              height: previewRect.height * cellPx,
               border: '3px dashed',
               borderColor: selectedColor,
               backgroundColor: `${selectedColor}40`,
@@ -375,10 +433,10 @@ export function Grid({
           <div
             className="absolute pointer-events-none"
             style={{
-              left: movePreviewRect.x * GRID_SIZE,
-              top: movePreviewRect.y * GRID_SIZE,
-              width: movePreviewRect.width * GRID_SIZE,
-              height: movePreviewRect.height * GRID_SIZE,
+              left: movePreviewRect.x * cellPx,
+              top: movePreviewRect.y * cellPx,
+              width: movePreviewRect.width * cellPx,
+              height: movePreviewRect.height * cellPx,
               border: '3px dashed #5a4a3a',
               backgroundColor: 'rgba(139, 115, 85, 0.25)',
               borderRadius: '8px',
@@ -386,7 +444,40 @@ export function Grid({
             }}
           />
         )}
+
+        {peerList.map((p) => (
+          <PeerCursorMarker
+            key={p.sessionId}
+            color={p.color}
+            x={p.cursor!.x * cellPx}
+            y={p.cursor!.y * cellPx}
+          />
+        ))}
       </div>
+    </div>
+  );
+}
+
+function PeerCursorMarker({ color, x, y }: { color: string; x: number; y: number }) {
+  return (
+    <div
+      className="absolute pointer-events-none"
+      style={{
+        left: x,
+        top: y,
+        zIndex: 100,
+        transition: 'left 80ms linear, top 80ms linear',
+      }}
+    >
+      <svg width="20" height="20" viewBox="0 0 20 20" style={{ display: 'block' }}>
+        <path
+          d="M2 2 L18 8 L9 10 L7 18 Z"
+          fill={color}
+          stroke="white"
+          strokeWidth="1.5"
+          strokeLinejoin="round"
+        />
+      </svg>
     </div>
   );
 }
