@@ -1,0 +1,6 @@
+@import url('https://fonts.googleapis.com/css2?family=Caveat:wght@400;600;700&family=Patrick+Hand&display=swap');
+
+:root {
+  --font-handwritten: 'Caveat', cursive;
+  --font-handwritten-body: 'Patrick Hand', 'Caveat', cursive;
+}
